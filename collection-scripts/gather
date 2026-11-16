@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+OUTPUT=${OSL_OUTPUT_DIR:-/must-gather}
+SANITIZER=${OSL_SANITIZER:-/usr/bin/osl-sanitize.py}
+REQUEST_TIMEOUT=${OSL_REQUEST_TIMEOUT:-30s}
+COMMAND_TIMEOUT=${OSL_COMMAND_TIMEOUT:-60s}
+LOG_SINCE=${OSL_LOG_SINCE:-24h}
+LOG_BYTES=${OSL_LOG_BYTES:-1048576}
+MAX_NAMESPACES=${OSL_MAX_NAMESPACES:-100}
+MAX_PODS=${OSL_MAX_PODS:-200}
+warnings=0
+collected=0
+declare -A namespaces=()
+declare -A namespace_done=()
+
+for tool in oc python3 timeout; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'Required executable missing: %s\n' "$tool" >&2
+        exit 1
+    fi
+done
+if [[ ! -r "$SANITIZER" ]]; then
+    printf 'Sanitizer is unavailable\n' >&2
+    exit 1
+fi
+for number in "$LOG_BYTES" "$MAX_NAMESPACES" "$MAX_PODS"; do
+    if [[ ! "$number" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        printf 'Limits must be positive integers with at most nine digits\n' >&2
+        exit 1
+    fi
+done
+for duration in "$REQUEST_TIMEOUT" "$COMMAND_TIMEOUT" "$LOG_SINCE"; do
+    if [[ ! "$duration" =~ ^[1-9][0-9]*[smh]$ ]]; then
+        printf 'Durations must be positive integer values followed by s, m, or h\n' >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$OUTPUT"
+# Do not mix this run with a previous bundle (including possibly unsafe files).
+if [[ -n $(find "$OUTPUT" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+    printf 'Output already contains a collection; use a fresh output directory\n' >&2
+    exit 1
+fi
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/osl-gather.XXXXXXXX")
+STARTED=$(date -u +%FT%TZ)
+printf 'osl-must-gather 1.39-dev\ntarget-product: OSL 1.39\nstarted: %s\n' "$STARTED" > "$OUTPUT/version"
+
+note() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$OUTPUT/summary.log"; }
+warn() { warnings=$((warnings + 1)); note "WARNING $*"; }
+# Called indirectly by the EXIT trap.
+# shellcheck disable=SC2329
+finish() {
+    local status=$?
+    trap - EXIT
+    note "finished status=$status collected=$collected warnings=$warnings"
+    # Only remove the private directory created above, never an input/output path.
+    python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$SCRATCH"
+    exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+note 'Starting OSL collection; Secret objects excluded; text redaction is best effort'
+
+oc_read() {
+    timeout --kill-after=5s "$COMMAND_TIMEOUT" oc --request-timeout="$REQUEST_TIMEOUT" "$@"
+}
+
+# Never retain raw stderr: it can contain URLs, payloads, or credentials.
+collect() {
+    local target=$1 mode=$2
+    shift 2
+    mkdir -p "$(dirname "$target")"
+    if oc_read "$@" 2>/dev/null | python3 "$SANITIZER" "$mode" > "$SCRATCH/sanitized"; then
+        mv "$SCRATCH/sanitized" "$target"
+        collected=$((collected + 1))
+    else
+        warn "collection failed: ${target#"$OUTPUT/"} (missing API, access denied, timeout, or sanitization failure)"
+    fi
+}
+
+add_namespace() {
+    local ns=$1
+    if [[ "$ns" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#ns} -le 63 ]]; then
+        if [[ ${#namespaces[@]} -lt "$MAX_NAMESPACES" || -n ${namespaces[$ns]+present} ]]; then
+            namespaces["$ns"]=1
+        else
+            warn "namespace limit reached; skipped $ns"
+        fi
+    fi
+}
+
+discover_refs() {
+    local file=$1 ns
+    if python3 -c '
+import json,sys
+def walk(x):
+    if isinstance(x,dict):
+        ns=x.get("namespace")
+        if isinstance(ns,str): print(ns)
+        for v in x.values(): walk(v)
+    elif isinstance(x,list):
+        for v in x: walk(v)
+walk(json.load(open(sys.argv[1])))
+' "$file" > "$SCRATCH/namespace-list" 2>/dev/null; then
+        while IFS= read -r ns; do
+            [[ -z "$ns" ]] || add_namespace "$ns"
+        done < "$SCRATCH/namespace-list"
+    else
+        warn 'Namespace references could not be parsed'
+    fi
+}
+
+collect "$OUTPUT/cluster/version.json" json get clusterversion.config.openshift.io version -o json
+collect "$OUTPUT/cluster/client-version.json" json version --client -o json
+
+# Keep OLM discovery in private scratch; publish only matching subscriptions.
+if oc_read get subscriptions.operators.coreos.com -A -o json > "$SCRATCH/subscriptions" 2>/dev/null; then
+    if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+d["items"]=[x for x in d.get("items",[]) if x.get("spec",{}).get("name") in ("logic-operator","logic-operator-rhel8") or x.get("metadata",{}).get("name") in ("logic-operator","logic-operator-rhel8")]
+json.dump(d,sys.stdout)
+' "$SCRATCH/subscriptions" 2>/dev/null | python3 "$SANITIZER" json > "$SCRATCH/matching-subscriptions"; then
+        mv "$SCRATCH/matching-subscriptions" "$OUTPUT/cluster/subscriptions.json"
+        discover_refs "$OUTPUT/cluster/subscriptions.json"
+    else
+        warn 'OLM subscription discovery returned invalid data'
+    fi
+else
+    warn 'OLM subscription discovery unavailable'
+fi
+
+# Default namespace is only a candidate: verify its existence without broad inspection.
+if oc_read get namespace openshift-serverless-logic -o name >/dev/null 2>&1; then
+    add_namespace openshift-serverless-logic
+fi
+
+# Do not guess CRD scope or API version. Discovery covers future sonataflow.org kinds.
+if oc_read get customresourcedefinitions.apiextensions.k8s.io -o json > "$SCRATCH/crds" 2>/dev/null && python3 -c '
+import json,sys
+for x in json.load(open(sys.argv[1])).get("items",[]):
+    s=x.get("spec",{}); g=s.get("group","")
+    if g=="sonataflow.org": print(x["metadata"]["name"],s["scope"])
+' "$SCRATCH/crds" > "$SCRATCH/crd-list" 2>/dev/null; then
+    :
+else
+    warn 'CRD discovery unavailable; using known SonataFlow candidates'
+    printf '%s\n' 'sonataflows.sonataflow.org Namespaced' 'sonataflowbuilds.sonataflow.org Namespaced' 'sonataflowplatforms.sonataflow.org Namespaced' 'sonataflowclusterplatforms.sonataflow.org Cluster' > "$SCRATCH/crd-list"
+fi
+while read -r resource scope; do
+    [[ -n "$resource" ]] || continue
+    if [[ ! "$resource" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?\.sonataflow\.org$ || ( "$scope" != Namespaced && "$scope" != Cluster ) ]]; then
+        warn 'Invalid CRD discovery entry omitted'
+        continue
+    fi
+    collect "$OUTPUT/cluster/crds/$resource.json" json get customresourcedefinitions.apiextensions.k8s.io "$resource" -o json
+    args=(get "$resource" -o json)
+    [[ "$scope" != Namespaced ]] || args+=(-A)
+    target="$OUTPUT/cluster/sonataflow/$resource.json"
+    collect "$target" json "${args[@]}"
+    [[ ! -f "$target" ]] || discover_refs "$target"
+done < "$SCRATCH/crd-list"
+
+for resource in clusterroles.rbac.authorization.k8s.io clusterrolebindings.rbac.authorization.k8s.io mutatingwebhookconfigurations.admissionregistration.k8s.io validatingwebhookconfigurations.admissionregistration.k8s.io; do
+    if oc_read get "$resource" -o json > "$SCRATCH/cluster-resource" 2>/dev/null; then
+        if python3 -c '
+import json,re,sys
+d=json.load(open(sys.argv[1]))
+d["items"]=[x for x in d.get("items",[]) if re.search(r"sonataflow|logic-operator",x.get("metadata",{}).get("name","")+" "+x.get("roleRef",{}).get("name",""))]
+json.dump(d,sys.stdout)
+' "$SCRATCH/cluster-resource" 2>/dev/null | python3 "$SANITIZER" json > "$SCRATCH/filtered-cluster-resource"; then
+            mv "$SCRATCH/filtered-cluster-resource" "$OUTPUT/cluster/$resource.json"
+        else
+            warn "invalid cluster resource response: $resource"
+        fi
+    else
+        warn "cluster resource unavailable: $resource"
+    fi
+done
+
+# Include installed Knative control planes, without assuming they are prerequisites
+# for every workflow. Resource requests remain bounded to these known namespaces.
+for ns in openshift-serverless knative-serving knative-eventing; do
+    if oc_read get namespace "$ns" -o name >/dev/null 2>&1; then add_namespace "$ns"; fi
+done
+
+resources=(
+    deployments.apps replicasets.apps statefulsets.apps daemonsets.apps
+    jobs.batch cronjobs.batch pods services endpoints endpointslices.discovery.k8s.io
+    routes.route.openshift.io configmaps persistentvolumeclaims
+    networkpolicies.networking.k8s.io poddisruptionbudgets.policy
+    horizontalpodautoscalers.autoscaling
+    subscriptions.operators.coreos.com installplans.operators.coreos.com
+    clusterserviceversions.operators.coreos.com operatorgroups.operators.coreos.com
+    services.serving.knative.dev configurations.serving.knative.dev
+    revisions.serving.knative.dev routes.serving.knative.dev
+    brokers.eventing.knative.dev triggers.eventing.knative.dev
+    channels.messaging.knative.dev subscriptions.messaging.knative.dev
+    pingsources.sources.knative.dev containersources.sources.knative.dev
+    apiserversources.sources.knative.dev sinkbindings.sources.knative.dev
+    knativeservings.operator.knative.dev knativeeventings.operator.knative.dev
+)
+
+# Namespace references may reveal shared platforms, brokers, or PostgreSQL services.
+# A bounded queue processes each discovered namespace only once.
+while :; do
+    ns=''
+    for candidate in "${!namespaces[@]}"; do
+        if [[ -z ${namespace_done[$candidate]+present} ]]; then ns=$candidate; break; fi
+    done
+    [[ -n "$ns" ]] || break
+    namespace_done["$ns"]=1
+    note "Collecting namespace $ns"
+    base="$OUTPUT/namespaces/$ns"
+    collect "$base/namespace.json" json get namespace "$ns" -o json
+    for resource in "${resources[@]}"; do
+        collect "$base/$resource.json" json get "$resource" -n "$ns" -o json
+    done
+    collect "$base/events.json" json get events -n "$ns" -o json
+    if [[ -f "$base/events.json" ]]; then
+        python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1])); d["items"]=[x for x in d.get("items",[]) if x.get("type","").lower() in ("warning","error")]; json.dump(d,sys.stdout,indent=2)
+' "$base/events.json" > "$base/warning-error-events.json"
+    fi
+
+    # Event-only inspect invokes the generic resource collector. Never use ns/,
+    # pods/, deployments/, "all", or Secrets here: these can collect extra data.
+    inspect_dir="$SCRATCH/inspect-$ns"
+    if oc_read adm inspect events -n "$ns" --dest-dir="$inspect_dir" >/dev/null 2>&1; then
+        while IFS= read -r -d '' inspected; do
+            relative=${inspected#"$inspect_dir/"}
+            destination="$base/inspect/$relative"
+            case "$inspected" in
+                *.yaml|*.yml) mode=yaml ;;
+                *.json) mode=json ;;
+                *) continue ;;
+            esac
+            mkdir -p "$(dirname "$destination")"
+            if python3 "$SANITIZER" "$mode" < "$inspected" > "$SCRATCH/sanitized"; then
+                mv "$SCRATCH/sanitized" "$destination"
+            else
+                warn "inspect artifact omitted after sanitization failure in $ns"
+            fi
+        done < <(find "$inspect_dir" -type f -print0)
+    else
+        warn "event inspection unavailable in $ns"
+    fi
+
+    if [[ -f "$base/pods.json" ]]; then
+        python3 -c '
+import json,sys
+pods=json.load(open(sys.argv[1])).get("items",[])
+if len(pods)>int(sys.argv[2]): print("LIMIT",file=sys.stderr)
+for p in sorted(pods,key=lambda p:p["metadata"]["name"])[:int(sys.argv[2])]:
+    for k in ("initContainers","containers","ephemeralContainers"):
+        for c in p.get("spec",{}).get(k,[]): print(p["metadata"]["name"],c["name"])
+' "$base/pods.json" "$MAX_PODS" > "$SCRATCH/containers" 2> "$SCRATCH/pod-limit"
+        if [[ -s "$SCRATCH/pod-limit" ]]; then warn "pod limit reached in $ns"; fi
+        while read -r pod container; do
+            [[ -n "$pod" && -n "$container" ]] || continue
+            for previous in current previous; do
+                args=(logs -n "$ns" "$pod" -c "$container" --timestamps --since="$LOG_SINCE" --tail=2000 --limit-bytes="$LOG_BYTES")
+                [[ "$previous" != previous ]] || args+=(--previous)
+                collect "$base/logs/$pod/$container.$previous.log" text "${args[@]}"
+            done
+        done < "$SCRATCH/containers"
+    fi
+done
+if [[ ${#namespace_done[@]} -eq 0 ]]; then warn 'No OSL or Knative namespaces discovered'; fi
+note "Completed namespace collection: ${#namespace_done[@]} namespaces"
+exit 0
