@@ -3,7 +3,26 @@
 Diagnostic collection image targeting Red Hat OpenShift Serverless Logic 1.39.
 This repository is an independent implementation, not an official Red Hat image.
 
-## Build and run
+## Run the published image
+
+The image is published on [Quay.io](https://quay.io/repository/rhn-support-sudnair/osl-must-gather):
+
+```text
+quay.io/rhn-support-sudnair/osl-must-gather:1.39
+```
+
+Log in to your OpenShift cluster with `oc`, then run:
+
+```bash
+oc adm must-gather --timeout=20m \
+  --image=quay.io/rhn-support-sudnair/osl-must-gather:1.39
+```
+
+`oc adm must-gather` creates temporary cluster resources and downloads output to
+your workstation; run it with appropriate administrative access. The collector's
+own API operations only read. Never place tokens in source files or image layers.
+
+## Build a custom image
 
 Build and publish to a registry you control (Podman is the default runtime):
 
@@ -15,10 +34,7 @@ make push IMAGE=quay.io/YOUR_ORG/osl-must-gather:1.39
 oc adm must-gather --timeout=20m --image=quay.io/YOUR_ORG/osl-must-gather:1.39
 ```
 
-The registry reference above is a placeholder, not an existing published image.
-`oc adm must-gather` creates temporary cluster resources and downloads output to
-your workstation; run it with appropriate administrative access. The collector's
-own API operations only read. Never place tokens in source files or image layers.
+Replace `YOUR_ORG` with your own registry namespace when building a custom image.
 
 Override `CONTAINER_ENGINE=docker` or `OPENSHIFT_VERSION=...` when building. The
 default base is `quay.io/openshift/origin-must-gather:4.19`; verify against your
@@ -62,7 +78,7 @@ an incomplete collection; check summary.log.
 Pass overrides through an explicit gather command, for example:
 
 ```bash
-oc adm must-gather --timeout=20m --image=quay.io/YOUR_ORG/osl-must-gather:1.39 -- \
+oc adm must-gather --timeout=20m --image=quay.io/rhn-support-sudnair/osl-must-gather:1.39 -- \
   /usr/bin/env OSL_MAX_NAMESPACES=50 OSL_MAX_PODS=100 OSL_LOG_SINCE=6h /usr/bin/gather
 ```
 
