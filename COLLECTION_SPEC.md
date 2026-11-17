@@ -89,27 +89,3 @@ key names; diagnosis may require separately supplied, manually sanitized config.
 7. Every API command has request and wall-clock bounds. Log volume and namespace/
    pod counts are capped. There is no guaranteed aggregate size/time bound; use
    `oc adm must-gather --timeout=20m` to bound pod execution externally.
-
-## Source evidence
-
-Read on 2026-11-16; upstream main branches are moving references.
-
-- [OSL 1.39 installation](https://docs.redhat.com/en/documentation/serverless_logic/1.39/html-single/install_serverless_logic_on_openshift_container_platform/index):
-  default namespace, all-namespace installation, OLM and pod troubleshooting.
-- [OSL 1.39 production services](https://docs.redhat.com/en/documentation/serverless_logic/1.39/html-single/manage_workflow_applications_in_production/index):
-  SonataFlowPlatform, Data Index/Jobs Service, PostgreSQL service references,
-  migration Jobs, and eventing configuration.
-- [OSL 1.39 workflow settings](https://docs.redhat.com/en/documentation/serverless_logic/1.39/html-single/configure_workflow_application_settings/index).
-- [GitOps collector](https://github.com/redhat-developer/gitops-must-gather/blob/main/gather_gitops.sh)
-  and [Makefile](https://github.com/redhat-developer/gitops-must-gather/blob/main/Makefile):
-  OLM discovery, CRD scope, inspect, warning events, configurable image targets.
-- [Pipelines Dockerfile](https://github.com/openshift-pipelines/must-gather/blob/main/Dockerfile):
-  reuse of OpenShift must-gather tools and gather entry point.
-- [RHDH Containerfile](https://github.com/redhat-developer/rhdh-must-gather/blob/main/Containerfile):
-  current Go collector, UBI runtime, must-gather transfer dependencies. It does
-  not currently inherit origin-must-gather; the OSL Dockerfile follows the user's
-  requested inheritance instead.
-- [oc 4.15 namespace inspector](https://github.com/openshift/oc/blob/release-4.15/pkg/cli/admin/inspect/namespace.go):
-  namespace resource list includes Secrets. The runtime base is configurable and
-  requires container/live verification; local oc is 4.15.15. The default 4.19
-  build argument is a development choice, not a verified OSL compatibility claim.
