@@ -36,10 +36,11 @@ oc adm must-gather --timeout=20m --image=quay.io/YOUR_ORG/osl-must-gather:1.39
 
 Replace `YOUR_ORG` with your own registry namespace when building a custom image.
 
-Override `CONTAINER_ENGINE=docker` or `OPENSHIFT_VERSION=...` when building. The
-default base is `quay.io/openshift/origin-must-gather:4.19`; verify against your
-cluster version and pin the approved base digest for a production image. Builds
-install Python 3 and PyYAML using the base image's configured RPM repositories.
+The Dockerfile pins the default `quay.io/openshift/origin-must-gather` base by
+digest. To select another base, set `OPENSHIFT_VERSION` to a tag or `tag@sha256:…`
+and verify it against your target cluster. Set `CONTAINER_ENGINE=docker` to use
+Docker. Builds install Python 3 and PyYAML using the base image's configured RPM
+repositories.
 `make clean IMAGE=...` removes only that local image and does not prune storage.
 
 ## Artifacts and limits
