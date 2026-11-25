@@ -19,13 +19,14 @@ def text(value):
     return value
 
 
-def sanitize(value):
+def sanitize(value, in_build=False):
     if isinstance(value, list):
-        return [sanitize(item) for item in value if not isinstance(item, dict) or item.get("kind") != "Secret"]
+        return [sanitize(item, in_build) for item in value if not isinstance(item, dict) or item.get("kind") != "Secret"]
     if not isinstance(value, dict):
         return text(value) if isinstance(value, str) else value
     if value.get("kind") == "Secret":
         return {"kind": "Secret", "omitted": True}
+    in_build = in_build or value.get("kind") in ("Build", "BuildConfig")
     result = {}
     for key, item in value.items():
         if key in ("annotations", "managedFields"):
@@ -37,11 +38,14 @@ def sanitize(value):
             result[key] = REDACTED
         elif key in ("secretRef", "secretKeyRef", "imagePullSecrets"):
             # References are useful and contain names/keys, not Secret payloads.
-            result[key] = sanitize(item)
+            result[key] = sanitize(item, in_build)
+        elif in_build and (key in ("dockerfile", "script", "logSnippet")
+                           or (key == "secret" and isinstance(item, str))):
+            result[key] = REDACTED
         elif SENSITIVE.search(key) or key in ("stringData", "tls", "command", "args"):
             result[key] = REDACTED
         else:
-            result[key] = sanitize(item)
+            result[key] = sanitize(item, in_build)
     return result
 
 

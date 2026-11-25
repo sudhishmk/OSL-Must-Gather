@@ -61,6 +61,15 @@ class CollectorTests(unittest.TestCase):
         for ns in ("openshift-serverless-logic", "custom-operator", "workflow-team", "database-team", "broker-team"):
             self.assertTrue((output / "namespaces" / ns / "pods.json").is_file(), ns)
         self.assertTrue((output / "namespaces/workflow-team/logs/controller/migration.previous.log").is_file())
+        workflow = output / "namespaces/workflow-team"
+        build = json.loads((workflow / "builds.build.openshift.io.json").read_text())["items"][0]
+        self.assertEqual(build["status"], {"phase": "Complete", "logSnippet": "<redacted>"})
+        config = json.loads((workflow / "buildconfigs.build.openshift.io.json").read_text())["items"][0]
+        self.assertEqual(config["spec"]["source"], {"dockerfile": "<redacted>", "sourceSecret": {"name": "git-creds"}})
+        self.assertEqual(config["spec"]["postCommit"]["script"], "<redacted>")
+        self.assertEqual(config["spec"]["triggers"][0]["github"]["secret"], "<redacted>")
+        stream = json.loads((workflow / "imagestreams.image.openshift.io.json").read_text())["items"][0]
+        self.assertEqual(stream["status"]["tags"][0]["items"][0]["image"], "sha256:fixture")
         artifacts = "\n".join(p.read_text() for p in output.rglob("*") if p.is_file())
         for secret in ("ENV_SECRET", "CONFIG_SECRET", "SECRET_PAYLOAD", "ANNOTATION_SECRET", "LOG_SECRET", "BEARER_SECRET", "URL_SECRET", "EVENT_SECRET"):
             self.assertNotIn(secret, artifacts)
@@ -92,6 +101,11 @@ class CollectorTests(unittest.TestCase):
         result, output, _, _ = self.run_collection("malformed")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertFalse((output / "namespaces/workflow-team/jobs.batch.json").exists())
+        self.assertFalse((output / "namespaces/workflow-team/buildconfigs.build.openshift.io.json").exists())
+        self.assertIn("collection failed: namespaces/workflow-team/buildconfigs.build.openshift.io.json",
+                      (output / "summary.log").read_text())
+        self.assertTrue((output / "namespaces/workflow-team/builds.build.openshift.io.json").exists())
+        self.assertTrue((output / "namespaces/workflow-team/imagestreams.image.openshift.io.json").exists())
         self.assertTrue((output / "namespaces/workflow-team/pods.json").exists())
 
     def test_malformed_discovery_continues_with_fallback(self):
