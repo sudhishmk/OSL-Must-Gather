@@ -35,8 +35,9 @@ collection-scripts/gather, collection-scripts/osl-sanitize.py, and tests/.
   mutating/validating webhook configurations with names or role references
   containing `sonataflow` or `logic-operator`. Custom naming can evade this filter.
 - Per selected namespace: Deployments, ReplicaSets, StatefulSets, DaemonSets,
-  Jobs/CronJobs, Pods, Services, Endpoints/EndpointSlices, Routes, ConfigMaps, PVCs,
-  NetworkPolicies, PDBs, HPAs, and the OLM resources above.
+  OpenShift Builds, BuildConfigs and ImageStreams, Jobs/CronJobs, Pods, Services,
+  Endpoints/EndpointSlices, Routes, ConfigMaps, PVCs, NetworkPolicies, PDBs,
+  HPAs, and the OLM resources above.
 - Knative APIs per selected namespace: services, configurations, revisions, routes
   (`serving.knative.dev`); brokers and triggers (`eventing.knative.dev`);
   channels/subscriptions (`messaging.knative.dev`); PingSources, ContainerSources,
@@ -60,6 +61,8 @@ Never request Secret objects. JSON/YAML sanitization drops Secret list entries,
 annotations (including last-applied configurations), managedFields, ConfigMap
 values, literal environment values, command/args, TLS material, JDBC URLs, and
 credential-like fields. Keep resource names and Secret references where possible.
+Build and BuildConfig artifacts also redact inline Dockerfiles, post-commit
+scripts, build log snippets, and literal webhook secrets.
 No raw stderr, kubeconfig, token, or authentication output goes into the bundle.
 Scratch files use a private random directory and restrictive umask and are removed
 on normal exit and caught signals. An uncatchable SIGKILL can leave scratch data;

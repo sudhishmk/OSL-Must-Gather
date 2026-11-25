@@ -54,6 +54,19 @@ elif resource == "configmaps":
     items = [{"kind": "ConfigMap", "metadata": {"name": "config"}, "data": {"ordinary": "CONFIG_SECRET"}}, {"kind": "Secret", "data": {"payload": "SECRET_PAYLOAD"}}]
 elif resource == "events":
     items = [{"type": "Warning", "message": "password=EVENT_SECRET"}, {"type": "Normal", "message": "Ready"}]
+elif resource == "builds.build.openshift.io":
+    items = [{"kind": "Build", "metadata": {"name": "preview-1"},
+              "status": {"phase": "Complete", "logSnippet": "BUILD_SNIPPET_CANARY"}}]
+elif resource == "buildconfigs.build.openshift.io":
+    if scenario == "malformed":
+        sys.exit(1)
+    items = [{"kind": "BuildConfig", "metadata": {"name": "preview"},
+              "spec": {"source": {"dockerfile": "DOCKERFILE_CANARY", "sourceSecret": {"name": "git-creds"}},
+                       "postCommit": {"script": "POST_COMMIT_CANARY"},
+                       "triggers": [{"github": {"secret": "WEBHOOK_CANARY"}}]}}]
+elif resource == "imagestreams.image.openshift.io":
+    items = [{"kind": "ImageStream", "metadata": {"name": "preview"},
+              "status": {"tags": [{"tag": "latest", "items": [{"image": "sha256:fixture"}]}]}}]
 elif resource == "jobs.batch":
     if scenario == "malformed":
         print("invalid-json PASSWORD_RAW")

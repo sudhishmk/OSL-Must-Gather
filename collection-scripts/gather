@@ -190,6 +190,7 @@ done
 
 resources=(
     deployments.apps replicasets.apps statefulsets.apps daemonsets.apps
+    builds.build.openshift.io buildconfigs.build.openshift.io imagestreams.image.openshift.io
     jobs.batch cronjobs.batch pods services endpoints endpointslices.discovery.k8s.io
     routes.route.openshift.io configmaps persistentvolumeclaims
     networkpolicies.networking.k8s.io poddisruptionbudgets.policy
